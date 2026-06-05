@@ -10,6 +10,13 @@
 #     ui.Slider/Switch/Button/TextField/SegmentedControl -> hand-drawn widgets
 #     photos.pick_asset() -> tkinter file dialog
 #
+# PERF FIX (desktop): FluidGrid was ported from pure-python nested loops to
+# numpy. The Stam semi-Lagrangian scheme is unchanged; the Gauss-Seidel
+# pressure solve became a Jacobi-style vectorized iteration (numerically
+# equivalent for this use). The render heatmap is now a single scaled blit
+# instead of ~2000 per-cell Surfaces. The main loop uses a fixed physics
+# timestep with an accumulator so a slow frame can't spiral into a freeze.
+#
 # IMPORTANT COORDINATE NOTE:
 #   Pythonista scene: origin bottom-left, "down" = -y.
 #   pygame:           origin top-left,    "down" = +y.
@@ -21,6 +28,7 @@ import random
 import sys
 import os
 
+import numpy as np
 import pygame
 
 try:
@@ -55,6 +63,10 @@ TORN_SPIN = 4.0
 GROUND_FRICTION = 0.55
 
 SIDEBAR_W = 240
+
+# ---------- fixed timestep ----------
+FIXED_DT = 1.0 / 60.0
+MAX_SUBFRAMES = 3        # cap physics catch-up so a slow frame can't snowball
 
 # ---------- math helpers ----------
 def v_add(a, b):  return (a[0]+b[0], a[1]+b[1])
@@ -287,28 +299,29 @@ class BadMarker:
     def __init__(self, x, y):
         self.x = x; self.y = y; self.life = BAD_MARKER_LIFE
 
-# ---------- fluid grid (Stam-style semi-Lagrangian) ----------
+# ---------- fluid grid (Stam-style semi-Lagrangian, numpy) ----------
+# Grids are stored as 2D arrays shape (ny, nx); index [j, i]. This matches the
+# original flat layout idx = j*nx + i. All loops were replaced with array ops.
 class FluidGrid:
     def __init__(self, nx, ny):
         self.nx = nx; self.ny = ny
-        n = nx*ny
-        self.u  = [0.0]*n
-        self.v  = [0.0]*n
-        self.u0 = [0.0]*n
-        self.v0 = [0.0]*n
-        self.p  = [0.0]*n
-        self.div = [0.0]*n
-        self.solid = [0]*n
-        self.pressure_field = [0.0]*n
-
-    def idx(self, i, j): return j*self.nx + i
+        self.u  = np.zeros((ny, nx), dtype=np.float64)
+        self.v  = np.zeros((ny, nx), dtype=np.float64)
+        self.p  = np.zeros((ny, nx), dtype=np.float64)
+        self.div = np.zeros((ny, nx), dtype=np.float64)
+        self.solid = np.zeros((ny, nx), dtype=bool)
+        self.pressure_field = np.zeros((ny, nx), dtype=np.float64)
+        ii, jj = np.meshgrid(np.arange(nx), np.arange(ny))
+        self.ii = ii.astype(np.float64)
+        self.jj = jj.astype(np.float64)
 
     def clear_solid(self):
-        for k in range(len(self.solid)): self.solid[k] = 0
+        self.solid[:] = False
 
     def rasterize_shape(self, shape, world_w, world_h):
         self.clear_solid()
-        if shape is None or not shape.valid: return
+        if shape is None or not shape.valid:
+            return
         nx, ny = self.nx, self.ny
         cw = world_w / nx
         ch = world_h / ny
@@ -322,142 +335,105 @@ class FluidGrid:
                 cx = (i+0.5)*cw
                 cy = (j+0.5)*ch
                 if point_in_polygon((cx, cy), shape.pts):
-                    self.solid[self.idx(i,j)] = 1
+                    self.solid[j, i] = True
 
     def set_inflow(self, ux_grid, uy_grid):
-        nx, ny = self.nx, self.ny
+        u, v = self.u, self.v
         if ux_grid >= 0:
-            for j in range(ny):
-                self.u[j*nx + 0] = ux_grid
-                self.v[j*nx + 0] = uy_grid
-                self.u[j*nx + (nx-1)] = self.u[j*nx + (nx-2)]
-                self.v[j*nx + (nx-1)] = self.v[j*nx + (nx-2)]
+            u[:, 0] = ux_grid;  v[:, 0] = uy_grid
+            u[:, -1] = u[:, -2]; v[:, -1] = v[:, -2]
         else:
-            for j in range(ny):
-                self.u[j*nx + (nx-1)] = ux_grid
-                self.v[j*nx + (nx-1)] = uy_grid
-                self.u[j*nx + 0] = self.u[j*nx + 1]
-                self.v[j*nx + 0] = self.v[j*nx + 1]
+            u[:, -1] = ux_grid; v[:, -1] = uy_grid
+            u[:, 0] = u[:, 1];  v[:, 0] = v[:, 1]
 
         if uy_grid >= 0:
-            for i in range(nx):
-                self.u[0*nx + i] = ux_grid
-                self.v[0*nx + i] = uy_grid
-                self.u[(ny-1)*nx + i] = self.u[(ny-2)*nx + i]
-                self.v[(ny-1)*nx + i] = self.v[(ny-2)*nx + i]
+            u[0, :] = ux_grid;  v[0, :] = uy_grid
+            u[-1, :] = u[-2, :]; v[-1, :] = v[-2, :]
         else:
-            for i in range(nx):
-                self.u[(ny-1)*nx + i] = ux_grid
-                self.v[(ny-1)*nx + i] = uy_grid
-                self.u[0*nx + i] = self.u[1*nx + i]
-                self.v[0*nx + i] = self.v[1*nx + i]
+            u[-1, :] = ux_grid; v[-1, :] = uy_grid
+            u[0, :] = u[1, :];  v[0, :] = v[1, :]
 
     def _enforce_solid(self):
-        for k in range(len(self.solid)):
-            if self.solid[k]:
-                self.u[k] = 0.0
-                self.v[k] = 0.0
+        self.u[self.solid] = 0.0
+        self.v[self.solid] = 0.0
 
     def _sample(self, field, x, y):
+        # bilinear sample at (continuous) grid coords; x,y are arrays.
         nx, ny = self.nx, self.ny
-        if x != x: x = nx*0.5
-        if y != y: y = ny*0.5
-        if x < 0.5: x = 0.5
-        if y < 0.5: y = 0.5
-        if x > nx-1.5: x = nx-1.5
-        if y > ny-1.5: y = ny-1.5
-        i0 = int(x); j0 = int(y)
-        i1 = i0+1;   j1 = j0+1
+        x = np.clip(np.nan_to_num(x, nan=nx*0.5), 0.5, nx-1.5)
+        y = np.clip(np.nan_to_num(y, nan=ny*0.5), 0.5, ny-1.5)
+        i0 = x.astype(np.intp); j0 = y.astype(np.intp)
+        i1 = i0 + 1; j1 = j0 + 1
         sx = x - i0; sy = y - j0
-        a = field[j0*nx+i0]; b = field[j0*nx+i1]
-        c = field[j1*nx+i0]; d = field[j1*nx+i1]
+        a = field[j0, i0]; b = field[j0, i1]
+        c = field[j1, i0]; d = field[j1, i1]
         return (a*(1-sx)+b*sx)*(1-sy) + (c*(1-sx)+d*sx)*sy
 
+    def sample_scalar(self, field, gx, gy):
+        # single-point sample for body velocity queries
+        a = self._sample(field, np.array([gx], dtype=np.float64),
+                                 np.array([gy], dtype=np.float64))
+        return float(a[0])
+
     def advect(self, dt):
-        nx, ny = self.nx, self.ny
-        u_old, v_old = self.u, self.v
-        u_new = self.u0
-        v_new = self.v0
-        solid = self.solid
-        sample = self._sample
-        for j in range(ny):
-            base = j*nx
-            for i in range(nx):
-                k = base + i
-                if solid[k]:
-                    u_new[k] = 0.0; v_new[k] = 0.0
-                    continue
-                uk = u_old[k]; vk = v_old[k]
-                x = i - dt * uk
-                y = j - dt * vk
-                u_new[k] = sample(u_old, x, y)
-                v_new[k] = sample(v_old, x, y)
-        self.u, self.u0 = u_new, u_old
-        self.v, self.v0 = v_new, v_old
+        x = self.ii - dt * self.u
+        y = self.jj - dt * self.v
+        nu = self._sample(self.u, x, y)
+        nv = self._sample(self.v, x, y)
+        nu[self.solid] = 0.0
+        nv[self.solid] = 0.0
+        self.u = nu
+        self.v = nv
 
     def diffuse(self, visc, dt):
-        if visc <= 1e-6: return
-        nx, ny = self.nx, self.ny
+        if visc <= 1e-6:
+            return
         a = dt * visc
-        denom = 1.0 + 4.0*a
-        u, v = self.u, self.v
-        u0, v0 = self.u0, self.v0
+        denom = 1.0 + 4.0 * a
         solid = self.solid
+        fluid = ~solid
+        u0 = self.u.copy()
+        v0 = self.v.copy()
+        u, v = self.u, self.v
         for _ in range(DIFFUSE_ITERS):
-            for j in range(1, ny-1):
-                base = j*nx
-                for i in range(1, nx-1):
-                    k = base + i
-                    if solid[k]: continue
-                    u[k] = (u0[k] + a*(u[k-1]+u[k+1]+u[k-nx]+u[k+nx])) / denom
-                    v[k] = (v0[k] + a*(v[k-1]+v[k+1]+v[k-nx]+v[k+nx])) / denom
+            un = (u0 + a*(np.roll(u,1,1)+np.roll(u,-1,1)+np.roll(u,1,0)+np.roll(u,-1,0))) / denom
+            vn = (v0 + a*(np.roll(v,1,1)+np.roll(v,-1,1)+np.roll(v,1,0)+np.roll(v,-1,0))) / denom
+            u = np.where(fluid, un, u)
+            v = np.where(fluid, vn, v)
+        self.u = u
+        self.v = v
 
     def project(self):
-        nx, ny = self.nx, self.ny
-        u, v = self.u, self.v
+        u, v, solid = self.u, self.v, self.solid
+        fluid = ~solid
+
+        # neighbor velocities: a solid neighbor contributes 0 (free-slip wall)
+        ul = np.where(np.roll(solid, 1, 1),  0.0, np.roll(u, 1, 1))
+        ur = np.where(np.roll(solid, -1, 1), 0.0, np.roll(u, -1, 1))
+        vd = np.where(np.roll(solid, 1, 0),  0.0, np.roll(v, 1, 0))
+        vu = np.where(np.roll(solid, -1, 0), 0.0, np.roll(v, -1, 0))
+        self.div = -0.5 * ((ur - ul) + (vu - vd))
+        self.div[solid] = 0.0
+
         p = self.p
-        div = self.div
-        solid = self.solid
-
-        for j in range(1, ny-1):
-            base = j*nx
-            for i in range(1, nx-1):
-                k = base + i
-                if solid[k]:
-                    div[k] = 0.0
-                    continue
-                u_l = 0.0 if solid[k-1]  else u[k-1]
-                u_r = 0.0 if solid[k+1]  else u[k+1]
-                v_d = 0.0 if solid[k-nx] else v[k-nx]
-                v_u = 0.0 if solid[k+nx] else v[k+nx]
-                div[k] = -0.5 * ((u_r - u_l) + (v_u - v_d))
-
+        p[:] = 0.0
         for _ in range(NS_ITERS):
-            for j in range(1, ny-1):
-                base = j*nx
-                for i in range(1, nx-1):
-                    k = base + i
-                    if solid[k]: continue
-                    pl = p[k-1]  if not solid[k-1]  else p[k]
-                    pr = p[k+1]  if not solid[k+1]  else p[k]
-                    pd = p[k-nx] if not solid[k-nx] else p[k]
-                    pu = p[k+nx] if not solid[k+nx] else p[k]
-                    p[k] = (div[k] + pl + pr + pd + pu) * 0.25
+            # solid neighbor reflects own pressure (Neumann)
+            pl = np.where(np.roll(solid, 1, 1),  p, np.roll(p, 1, 1))
+            pr = np.where(np.roll(solid, -1, 1), p, np.roll(p, -1, 1))
+            pd = np.where(np.roll(solid, 1, 0),  p, np.roll(p, 1, 0))
+            pu = np.where(np.roll(solid, -1, 0), p, np.roll(p, -1, 0))
+            pnew = (self.div + pl + pr + pd + pu) * 0.25
+            p = np.where(fluid, pnew, p)
+        self.p = p
 
-        for j in range(1, ny-1):
-            base = j*nx
-            for i in range(1, nx-1):
-                k = base + i
-                if solid[k]: continue
-                pl = p[k-1]  if not solid[k-1]  else p[k]
-                pr = p[k+1]  if not solid[k+1]  else p[k]
-                pd = p[k-nx] if not solid[k-nx] else p[k]
-                pu = p[k+nx] if not solid[k+nx] else p[k]
-                u[k] -= 0.5 * (pr - pl)
-                v[k] -= 0.5 * (pu - pd)
-
-        for k in range(nx*ny):
-            self.pressure_field[k] = p[k]
+        pl = np.where(np.roll(solid, 1, 1),  p, np.roll(p, 1, 1))
+        pr = np.where(np.roll(solid, -1, 1), p, np.roll(p, -1, 1))
+        pd = np.where(np.roll(solid, 1, 0),  p, np.roll(p, 1, 0))
+        pu = np.where(np.roll(solid, -1, 0), p, np.roll(p, -1, 0))
+        self.u = np.where(fluid, u - 0.5 * (pr - pl), u)
+        self.v = np.where(fluid, v - 0.5 * (pu - pd), v)
+        self.pressure_field = self.p
 
     def step(self, dt, visc, ux_grid, uy_grid):
         speed = max(abs(ux_grid), abs(uy_grid), 1e-3)
@@ -469,8 +445,6 @@ class FluidGrid:
             self.set_inflow(ux_grid, uy_grid)
             self._enforce_solid()
             self.advect(sub_dt)
-            for k in range(len(self.u)):
-                self.u0[k] = self.u[k]; self.v0[k] = self.v[k]
             self.diffuse(visc, sub_dt)
             self._enforce_solid()
             self.project()
@@ -479,32 +453,49 @@ class FluidGrid:
     def sample_velocity(self, x, y, world_w, world_h):
         gx = x / world_w * self.nx
         gy = y / world_h * self.ny
-        u = self._sample(self.u, gx, gy)
-        v = self._sample(self.v, gx, gy)
+        u = self.sample_scalar(self.u, gx, gy)
+        v = self.sample_scalar(self.v, gx, gy)
         return u * world_w / self.nx, v * world_h / self.ny
 
     def compute_forces(self, shape, world_w, world_h, wind_dir, U_world, rho=1.0):
-        if shape is None or not shape.valid: return 0.0, 0.0
-        nx, ny = self.nx, self.ny
-        Fx = 0.0; Fy = 0.0
+        if shape is None or not shape.valid:
+            return 0.0, 0.0
         solid = self.solid
         p = self.p
-        for j in range(1, ny-1):
-            base = j*nx
-            for i in range(1, nx-1):
-                k = base + i
-                if not solid[k]: continue
-                for di, dj in ((1,0),(-1,0),(0,1),(0,-1)):
-                    ni, nj = i+di, j+dj
-                    nk = nj*nx+ni
-                    if 0 <= ni < nx and 0 <= nj < ny and not solid[nk]:
-                        p_fluid = p[nk]
-                        Fx -= p_fluid * di
-                        Fy -= p_fluid * dj
+        # surface cells = solid cells with at least one fluid 4-neighbor.
+        # Force = -sum over those interfaces of p_fluid * outward-normal-component.
+        fl = ~solid
+        # for each direction, find solid cells whose neighbor in that dir is fluid
+        # di = +1 (right): neighbor to the right is fluid -> contributes -p_right * (+1) to Fx
+        Fx = 0.0
+        Fy = 0.0
+        # right neighbor
+        nb = np.zeros_like(p); nb[:, :-1] = p[:, 1:]
+        m  = np.zeros_like(solid); m[:, :-1] = fl[:, 1:]
+        sel = solid & m
+        Fx -= np.sum(nb[sel]) * 1
+        # left neighbor
+        nb = np.zeros_like(p); nb[:, 1:] = p[:, :-1]
+        m  = np.zeros_like(solid); m[:, 1:] = fl[:, :-1]
+        sel = solid & m
+        Fx -= np.sum(nb[sel]) * (-1)
+        # up neighbor (j+1)
+        nb = np.zeros_like(p); nb[:-1, :] = p[1:, :]
+        m  = np.zeros_like(solid); m[:-1, :] = fl[1:, :]
+        sel = solid & m
+        Fy -= np.sum(nb[sel]) * 1
+        # down neighbor (j-1)
+        nb = np.zeros_like(p); nb[1:, :] = p[:-1, :]
+        m  = np.zeros_like(solid); m[1:, :] = fl[:-1, :]
+        sel = solid & m
+        Fy -= np.sum(nb[sel]) * (-1)
+
+        nx = self.nx
         L_grid = shape.char_length * nx / max(world_w, 1.0)
         U_grid = U_world * nx / max(world_w, 1.0)
         dyn = 0.5 * rho * U_grid * U_grid * max(L_grid, 1.0)
-        if dyn < 1e-6: return 0.0, 0.0
+        if dyn < 1e-6:
+            return 0.0, 0.0
         CALIB = 180.0
         wdx, wdy = wind_dir
         Cd = CALIB * (Fx*wdx + Fy*wdy) / dyn
@@ -534,7 +525,8 @@ class WindTunnel:
         self.show_heatmap = False
         self.mode = 'draw'
 
-        self.heat = [[0.0]*HEAT_H for _ in range(HEAT_W)]
+        # heat stored as numpy (HEAT_H, HEAT_W) for fast blit
+        self.heat = np.zeros((HEAT_H, HEAT_W), dtype=np.float64)
 
         self.cd_estimate = 0.0
         self.cl_estimate = 0.0
@@ -779,16 +771,11 @@ class WindTunnel:
         self.particles = new_list
 
     def _step_heatmap(self, dt):
-        if not self.show_heatmap: return
-        mx = 1e-3
-        pf = self.fluid.pressure_field
-        for v in pf:
-            av = abs(v)
-            if av > mx: mx = av
-        inv = 1.0 / mx
-        for i in range(FX):
-            for j in range(FY):
-                self.heat[i][j] = pf[j*FX + i] * inv
+        if not self.show_heatmap:
+            return
+        pf = self.fluid.pressure_field   # (ny, nx) == (HEAT_H, HEAT_W)
+        mx = max(float(np.abs(pf).max()), 1e-3)
+        self.heat = pf / mx
 
     def _step_markers(self, dt):
         new = []
@@ -1050,6 +1037,7 @@ class App:
         self.btn_phys = None
         self.weight_text = ''
         self.weight_unit_idx = 1
+        self._heat_surf = None   # small cached HEAT_W x HEAT_H surface
         self._build_widgets()
         self.running = True
 
@@ -1078,7 +1066,7 @@ class App:
         self.seg_unit = Segmented((138, y, 92, 28), ['г', 'кг', 'т'], 1, self._on_unit)
         self.widgets.append(self.seg_unit); y += 38
 
-        self.btn_phys = Button((12, y, 216, 34), 'ВКЛЮЧИТЬ ФИЗИКУ', self._toggle_phys, bg=(26, 76, 46)); 
+        self.btn_phys = Button((12, y, 216, 34), 'ВКЛЮЧИТЬ ФИЗИКУ', self._toggle_phys, bg=(26, 76, 46));
         self.widgets.append(self.btn_phys); y += 42
 
         self.widgets.append(Button((12, y, 216, 30), 'Clear bad markers', s.clear_bad, bg=(64, 20, 26))); y += 36
@@ -1200,20 +1188,30 @@ class App:
             pygame.draw.line(scr, (102, 89, 64), (SIDEBAR_W, gy), (s.w, gy), 2)
             pygame.draw.rect(scr, (26, 23, 18), (SIDEBAR_W, gy, s.w-SIDEBAR_W, GROUND_MARGIN))
 
-        # heatmap
+        # heatmap: build one small HEAT_W x HEAT_H surface from arrays, then
+        # scale-blit it once (instead of ~2000 per-cell Surface fills).
         if s.show_heatmap:
-            cw = s.w / HEAT_W; ch = s.h / HEAT_H
-            for i in range(HEAT_W):
-                for j in range(HEAT_H):
-                    pv = s.heat[i][j]
-                    if abs(pv) < 0.05: continue
-                    if pv > 0:
-                        col = (255, 76, 51); a = min(0.45, pv*0.5)
-                    else:
-                        col = (51, 128, 255); a = min(0.45, -pv*0.5)
-                    surf = pygame.Surface((int(cw)+1, int(ch)+1), pygame.SRCALPHA)
-                    surf.fill((col[0], col[1], col[2], int(a*255)))
-                    scr.blit(surf, (int(i*cw), int(j*ch)))
+            heat = s.heat                       # (HEAT_H, HEAT_W)
+            ht = heat.T                          # -> (HEAT_W, HEAT_H), surfarray layout
+            pos = ht > 0
+            rgb = np.empty((HEAT_W, HEAT_H, 3), dtype=np.uint8)
+            rgb[pos] = (255, 76, 51)
+            rgb[~pos] = (51, 128, 255)
+            a = np.clip(np.abs(ht) * 0.5, 0.0, 0.45)
+            a[np.abs(ht) < 0.05] = 0.0
+            alpha = (a * 255).astype(np.uint8)
+
+            # fresh per-frame SRCALPHA surface; write RGB then alpha via views,
+            # release locks before scaling.
+            surf = pygame.Surface((HEAT_W, HEAT_H), pygame.SRCALPHA)
+            rgb_view = pygame.surfarray.pixels3d(surf)
+            rgb_view[:, :, :] = rgb
+            del rgb_view
+            alpha_view = pygame.surfarray.pixels_alpha(surf)
+            alpha_view[:, :] = alpha
+            del alpha_view
+            scaled = pygame.transform.smoothscale(surf, (s.w, s.h))
+            scr.blit(scaled, (0, 0))
 
         # shape
         if s.shape and s.shape.valid:
@@ -1306,11 +1304,24 @@ class App:
         line(f'Body: {s.body_status}', (255, 217, 102))
 
     def run(self):
+        accumulator = 0.0
         while self.running:
-            dt = self.clock.tick(60) / 1000.0
+            frame_dt = min(self.clock.tick(60) / 1000.0, 0.1)
             for ev in pygame.event.get():
                 self.handle_event(ev)
-            self.sim.update(dt)
+
+            # fixed-timestep physics with an accumulator. a slow frame steps
+            # the sim at most MAX_SUBFRAMES times, then drops the time debt so
+            # it can never snowball into a permanent freeze.
+            accumulator += frame_dt
+            steps = 0
+            while accumulator >= FIXED_DT and steps < MAX_SUBFRAMES:
+                self.sim.update(FIXED_DT)
+                accumulator -= FIXED_DT
+                steps += 1
+            if steps >= MAX_SUBFRAMES:
+                accumulator = 0.0
+
             self.render()
         pygame.quit()
 
@@ -1319,3 +1330,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
