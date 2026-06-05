@@ -1,0 +1,129 @@
+Wind Tunnel — Proprietary Software License
+Copyright (c) 2026 vvas2002. All rights reserved.
+
+================================================================
+ACCEPTANCE
+================================================================
+By downloading, copying, installing, running, or otherwise using the
+Software — in whole or in part, in source or compiled form — You acknowledge
+that You have read this license, understand it, and agree to be legally
+bound by all of its terms. If You do not agree to these terms, You must not
+download, install, run, or use the Software, and You must delete any copy in
+Your possession.
+
+================================================================
+0. DEFINITIONS
+================================================================
+"Software" means the Wind Tunnel program, its source code, assets,
+documentation, and any compiled or packaged builds distributed with
+this license.
+
+"You" means any individual or legal entity exercising permissions
+granted by this license.
+
+"Derivative Work" means any work based on or derived from the Software,
+including modifications, ports, translations, rewrites, or any work that
+incorporates a substantial portion of the Software in any form.
+
+"Author" means vvas2002, the copyright holder.
+
+================================================================
+1. GRANT OF LICENSE
+================================================================
+Subject to full compliance with this license, the Author grants You a
+non-exclusive, non-transferable, revocable, royalty-free license to:
+
+  (a) download and run the Software for personal, non-commercial use; and
+  (b) view the source code for personal study and reference.
+
+No other rights are granted. All rights not expressly granted are
+reserved by the Author.
+
+================================================================
+2. RESTRICTIONS
+================================================================
+You may NOT, without prior explicit written permission from the Author:
+
+  2.1  Redistribution. Copy, fork, clone-and-republish, publish, upload to
+       any third-party platform, mirror, host, or otherwise distribute the
+       Software or any substantial portion of it on any platform,
+       repository, file host, package registry, or service — including but
+       not limited to forking on GitHub, GitLab, Gitea, or any other
+       code-hosting platform, as well as npm, PyPI, Pastebin, Telegram
+       channels, or any other distribution channel. Creating a public fork
+       or a public copy of this repository is expressly prohibited.
+       (Downloading a copy onto Your own personal device for permitted
+       personal use is allowed; re-uploading or sharing it is not.)
+
+  2.2  Commercial Use. Use the Software or any Derivative Work for any
+       commercial purpose, including selling, licensing, sublicensing,
+       renting, advertising-supported distribution, or integrating it
+       into a paid or revenue-generating product or service.
+
+  2.3  Sale or Payment. Sell, auction, or accept payment of any kind in
+       exchange for access to, copies of, or builds derived from the
+       Software. This includes donations, tips, "fan payments", paywalls,
+       or any monetization framed under another name. You may NOT sell,
+       resell, sublicense, or otherwise monetize this repository, any fork,
+       clone, or copy of it, or any Derivative Work — whether in original,
+       modified, obfuscated, rebranded, or repackaged form, and whether
+       sold directly, through a marketplace, through a third party, or
+       under a different name. Any attempt to profit from the Software or
+       anything derived from it without written permission is strictly
+       prohibited.
+
+  2.4  Derivative Distribution. Publish, share, or distribute any
+       Derivative Work, even if substantially transformed, obfuscated,
+       rewritten, or reimplemented from the Software's logic or design.
+
+  2.5  Circumvention. Use any indirect method, automated tool, or third
+       party to accomplish anything restricted above, or to remove,
+       obscure, or alter any copyright or license notice.
+
+================================================================
+3. ATTRIBUTION
+================================================================
+Any permitted reference to, showcase of, or discussion of the Software
+must clearly and visibly credit the original Author: vvas2002. Copyright
+and license notices must be preserved in all copies.
+
+================================================================
+4. TERMINATION
+================================================================
+This license and all rights granted under it terminate automatically and
+immediately if You breach any of its terms. Upon termination You must
+cease all use of the Software and destroy all copies in Your possession.
+The Author may also revoke this license at any time at their discretion.
+
+================================================================
+5. ENFORCEMENT
+================================================================
+Violation of this license constitutes copyright infringement and may be
+enforced under applicable copyright law, including takedown procedures
+such as DMCA notices. The Author reserves the right to pursue any and all
+remedies available at law or in equity.
+
+================================================================
+6. NO WARRANTY
+================================================================
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+
+================================================================
+7. LIMITATION OF LIABILITY
+================================================================
+IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING
+FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+================================================================
+8. CONTACT
+================================================================
+For permissions beyond the scope of this license, contact the Author
+(vvas2002).
+
+A Russian-language copy of this license is provided in LICENSE.ru.txt for
+convenience only. In the event of any conflict or ambiguity, THIS ENGLISH
+VERSION GOVERNS.
